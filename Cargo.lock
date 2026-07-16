@@ -101,6 +101,7 @@ dependencies = [
  "keyring",
  "prost",
  "prost-build",
+ "serde_json",
 ]
 
 [[package]]
