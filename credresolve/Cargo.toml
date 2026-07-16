@@ -15,6 +15,7 @@ path = "src/lib.rs"
 anyhow.workspace = true
 prost.workspace = true
 directories.workspace = true
+serde_json.workspace = true
 
 # OS keychain backend is macOS-only for now (Linux Secret Service / Windows
 # Credential Manager are later); elsewhere credstore stubs to None, so the

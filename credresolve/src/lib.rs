@@ -14,6 +14,7 @@ pub mod proto {
     include!(concat!(env!("OUT_DIR"), "/fastverk.v1.rs"));
 }
 
+pub mod config;
 pub mod connections;
 pub mod credstore;
 pub mod paths;

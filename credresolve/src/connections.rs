@@ -109,6 +109,13 @@ pub fn resolve(req_uri: &str) -> Result<Option<ResolvedCred>> {
             }));
         }
     }
+    // Config-driven match arms (the CI / CredentialSet path): host→auth supplied
+    // as data (a mounted credentials.json), not baked into this binary. Covers
+    // hosts the built-in defaults don't — a private ECR mirror, a self-hosted
+    // forge — each with a compiled-in secret source (env / file / minted ECR).
+    if let Some(c) = crate::config::resolve_host(host) {
+        return Ok(Some(c));
+    }
     // Generic per-host fallback: for any host without a matching connection
     // (or whose connection has no stored secret), emit `Authorization: Bearer`
     // when `FASTVERK_TOKEN_<HOST>` is set. Lets a consumer authenticate an
