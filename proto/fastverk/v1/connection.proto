@@ -90,6 +90,9 @@ message OAuthConfig {
   repeated string scopes = 6;
   // Loopback redirect URI for the PKCE flow.
   string redirect_uri = 7;
+  // OIDC issuer (the `iss` claim). When set, id_tokens are signature-verified
+  // (RS256) against `{issuer}/.well-known/jwks.json`, with `aud == client_id`.
+  string issuer = 8;
 }
 
 // One managed connection: which hosts it covers, what header to inject,
