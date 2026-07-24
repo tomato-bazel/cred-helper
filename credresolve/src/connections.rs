@@ -78,6 +78,13 @@ pub fn host_matches(pattern: &str, host: &str) -> bool {
 pub struct ResolvedCred {
     pub header: String,
     pub value: String,
+    /// When Bazel should re-invoke the helper for this host (RFC 3339 UTC), or
+    /// `None` to let Bazel cache it for the build. Set only for a *refreshable*
+    /// source (a token file, see `host_file_token`): a long build outlives a
+    /// short-lived token, so Bazel must re-read the file periodically rather
+    /// than cache the first value forever. Env/keychain secrets are static, so
+    /// they leave this `None` and behave exactly as before.
+    pub expires: Option<String>,
 }
 
 /// Resolve the auth header for a request URI. `None` => anonymous fetch.
@@ -94,6 +101,20 @@ pub fn resolve(req_uri: &str) -> Result<Option<ResolvedCred>> {
     if host.is_empty() {
         return Ok(None);
     }
+    // Refreshable per-host fallback, checked FIRST because it is the only source
+    // that survives a long build: `FASTVERK_TOKEN_FILE_<HOST>` points at a file
+    // whose contents a producer (e.g. the build-runner's token-refresh loop)
+    // rewrites in place. We read it fresh on every invocation and tell Bazel to
+    // re-invoke us before the token's TTL, so a build longer than the token
+    // lifetime keeps working instead of dying UNAUTHENTICATED mid-way. See
+    // aion-idp-build-rbe-token-expiry.
+    if let Some(secret) = host_file_token(host) {
+        return Ok(Some(ResolvedCred {
+            header: "Authorization".to_string(),
+            value: format!("Bearer {secret}"),
+            expires: Some(rfc3339_utc(now_secs() + file_token_ttl_secs())),
+        }));
+    }
     // User registry wins; the built-in defaults fill in on a miss (or when
     // there's no registry file at all, e.g. CI).
     let reg = load().unwrap_or_default();
@@ -106,15 +127,9 @@ pub fn resolve(req_uri: &str) -> Result<Option<ResolvedCred>> {
             return Ok(Some(ResolvedCred {
                 header: conn.header.clone(),
                 value: format!("{}{secret}", conn.value_prefix),
+                expires: None,
             }));
         }
-    }
-    // Config-driven match arms (the CI / CredentialSet path): host→auth supplied
-    // as data (a mounted credentials.json), not baked into this binary. Covers
-    // hosts the built-in defaults don't — a private ECR mirror, a self-hosted
-    // forge — each with a compiled-in secret source (env / file / minted ECR).
-    if let Some(c) = crate::config::resolve_host(host) {
-        return Ok(Some(c));
     }
     // Generic per-host fallback: for any host without a matching connection
     // (or whose connection has no stored secret), emit `Authorization: Bearer`
@@ -125,9 +140,68 @@ pub fn resolve(req_uri: &str) -> Result<Option<ResolvedCred>> {
         return Ok(Some(ResolvedCred {
             header: "Authorization".to_string(),
             value: format!("Bearer {secret}"),
+            expires: None,
         }));
     }
     Ok(None)
+}
+
+/// The refreshable per-host token file (`FASTVERK_TOKEN_FILE_<sanitized host>`),
+/// read fresh and trimmed. The env var holds the FILE PATH, not the secret, so a
+/// producer can rewrite the file's contents without the reader's environment
+/// (frozen at process start) ever going stale. Empty path, missing/unreadable
+/// file, or empty contents all yield `None` (degrade to the next source).
+fn host_file_token(host: &str) -> Option<String> {
+    let path = std::env::var(canonical_env_var(host).replace("FASTVERK_TOKEN_", "FASTVERK_TOKEN_FILE_"))
+        .ok()
+        .filter(|p| !p.is_empty())?;
+    std::fs::read_to_string(&path)
+        .ok()
+        .map(|s| s.trim().to_string())
+        .filter(|v| !v.is_empty())
+}
+
+/// How long a file-sourced token is advertised as valid (seconds), overridable
+/// via `FASTVERK_TOKEN_FILE_TTL_SECS`. Kept SHORT (default 600s) so Bazel
+/// re-reads the file well within a real token's lifetime; the producer refresh
+/// loop only needs to rewrite the file faster than the *real* token expires.
+fn file_token_ttl_secs() -> u64 {
+    std::env::var("FASTVERK_TOKEN_FILE_TTL_SECS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .filter(|&s| s > 0)
+        .unwrap_or(600)
+}
+
+/// Seconds since the Unix epoch (0 if the clock is before it — impossible in
+/// practice, and harmless here since it only shortens the advertised TTL).
+fn now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
+/// Format Unix-epoch seconds as an RFC 3339 UTC timestamp (`YYYY-MM-DDTHH:MM:SSZ`),
+/// which is the format Bazel's credential-helper protocol expects for `expires`.
+/// Civil-from-days is Howard Hinnant's algorithm (valid for all Gregorian dates);
+/// hand-rolled to keep credresolve dependency-light (no chrono/time).
+fn rfc3339_utc(secs: u64) -> String {
+    let days = (secs / 86_400) as i64;
+    let rem = secs % 86_400;
+    let (hh, mm, ss) = (rem / 3600, (rem % 3600) / 60, rem % 60);
+    // days since 1970-01-01 -> civil (year, month, day)
+    let z = days + 719_468;
+    let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
+    let doe = z - era * 146_097; // [0, 146096]
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365; // [0, 399]
+    let y = yoe + era * 400;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
+    let mp = (5 * doy + 2) / 153; // [0, 11]
+    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
+    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let year = if m <= 2 { y + 1 } else { y };
+    format!("{year:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
 }
 
 /// The generic per-host env var (`FASTVERK_TOKEN_<sanitized host>`), if set
@@ -431,5 +505,49 @@ mod tests {
         std::env::set_var(var, "tok");
         assert_eq!(super::host_env_token("git.example.com").as_deref(), Some("tok"));
         std::env::remove_var(var);
+    }
+
+    #[test]
+    fn rfc3339_utc_formats_known_epochs() {
+        use super::rfc3339_utc;
+        assert_eq!(rfc3339_utc(0), "1970-01-01T00:00:00Z");
+        assert_eq!(rfc3339_utc(1_000_000_000), "2001-09-09T01:46:40Z");
+        assert_eq!(rfc3339_utc(1_735_689_600), "2025-01-01T00:00:00Z"); // leap-year boundary
+        assert_eq!(rfc3339_utc(1_709_164_800), "2024-02-29T00:00:00Z"); // Feb 29 (leap day)
+        assert_eq!(rfc3339_utc(1_709_251_200), "2024-03-01T00:00:00Z"); // day after the leap day
+        assert_eq!(rfc3339_utc(59), "1970-01-01T00:00:59Z"); // seconds field
+        assert_eq!(rfc3339_utc(3661), "1970-01-01T01:01:01Z"); // h/m/s split
+    }
+
+    #[test]
+    fn host_file_token_reads_the_file_fresh_and_resolve_sets_expires() {
+        use std::io::Write;
+        // Unique path so the test doesn't collide with a real registry or another run.
+        let path = std::env::temp_dir().join(format!("credresolve-filetok-{}", std::process::id()));
+        let var = "FASTVERK_TOKEN_FILE_RBE_EXAMPLE_COM";
+        std::env::remove_var(var);
+
+        // No env var -> None.
+        assert_eq!(super::host_file_token("rbe.example.com"), None);
+
+        std::env::set_var(var, &path);
+        // Env var set but file absent -> None (degrade, don't error).
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(super::host_file_token("rbe.example.com"), None);
+
+        // File present -> its trimmed contents, read fresh each call.
+        std::fs::File::create(&path).unwrap().write_all(b"  tok-v1\n").unwrap();
+        assert_eq!(super::host_file_token("rbe.example.com").as_deref(), Some("tok-v1"));
+        std::fs::File::create(&path).unwrap().write_all(b"tok-v2").unwrap();
+        assert_eq!(super::host_file_token("rbe.example.com").as_deref(), Some("tok-v2"));
+
+        // resolve() picks it up as a Bearer with an `expires` set (refreshable).
+        let c = super::resolve("https://rbe.example.com/foo").unwrap().unwrap();
+        assert_eq!(c.header, "Authorization");
+        assert_eq!(c.value, "Bearer tok-v2");
+        assert!(c.expires.is_some(), "a file-sourced token must advertise an expiry");
+
+        std::env::remove_var(var);
+        let _ = std::fs::remove_file(&path);
     }
 }

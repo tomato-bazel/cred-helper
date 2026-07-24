@@ -44,17 +44,25 @@ fn respond(body: &str) -> String {
     // no registry file still authenticates via the env backend. Any miss —
     // unknown host, no stored secret, or an error — degrades to anonymous.
     match credresolve::connections::resolve(&uri) {
-        Ok(Some(c)) => headers(&c.header, &c.value),
+        Ok(Some(c)) => headers(&c.header, &c.value, c.expires.as_deref()),
         _ => EMPTY.to_string(),
     }
 }
 
-fn headers(header: &str, value: &str) -> String {
-    format!(
-        "{{\"headers\":{{\"{}\":[\"{}\"]}}}}",
+/// The Bazel credential-helper `get` response. `expires` (RFC 3339) is emitted
+/// only when the resolved source is refreshable, and it is what makes Bazel
+/// re-invoke this helper before the token dies rather than caching the first
+/// value for the whole build.
+fn headers(header: &str, value: &str, expires: Option<&str>) -> String {
+    let hdrs = format!(
+        "\"headers\":{{\"{}\":[\"{}\"]}}",
         json_escape(header),
         json_escape(value),
-    )
+    );
+    match expires {
+        Some(ts) => format!("{{{hdrs},\"expires\":\"{}\"}}", json_escape(ts)),
+        None => format!("{{{hdrs}}}"),
+    }
 }
 
 /// JSON-escape a string for embedding as a JSON string value.
