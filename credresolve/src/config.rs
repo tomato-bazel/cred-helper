@@ -83,6 +83,9 @@ fn resolve_arm(arm: &Value, host: &str) -> Option<ResolvedCred> {
     Some(ResolvedCred {
         header,
         value: format!("{prefix}{secret}"),
+        // The config-file path does not advertise refresh yet; a file-secret arm
+        // that needs it would set this the same way connections::resolve does.
+        expires: None,
     })
 }
 
