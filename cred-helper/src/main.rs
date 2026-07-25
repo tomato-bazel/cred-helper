@@ -41,12 +41,40 @@ fn respond(body: &str) -> String {
     // The connection registry resolves the header for the request host
     // through the secret backends (keychain locally, canonical env vars in
     // CI). `resolve` falls back to the built-in default registry, so CI with
-    // no registry file still authenticates via the env backend. Any miss —
-    // unknown host, no stored secret, or an error — degrades to anonymous.
-    match credresolve::connections::resolve(&uri) {
-        Ok(Some(c)) => headers(&c.header, &c.value, c.expires.as_deref()),
-        _ => EMPTY.to_string(),
+    // no registry file still authenticates via the env backend.
+    if let Ok(Some(c)) = credresolve::connections::resolve(&uri) {
+        return headers(&c.header, &c.value, c.expires.as_deref());
     }
+
+    // Then the CONFIG-DRIVEN arms (`credresolve::config`): a CredentialSet
+    // rendered to $FASTVERK_CRED_CONFIG and mounted into the build pod. This is
+    // how a build authenticates a registry the binary knows nothing about — the
+    // private-ECR mirror arm (`awsEcr`) in particular.
+    //
+    // This call is the whole reason the module ships. Without it NOTHING
+    // referenced `credresolve::config`, so the linker dead-code-eliminated the
+    // entire feature: the released binary contained no `awsEcr`, no
+    // `hostPatterns`, not even the `FASTVERK_CRED_CONFIG` string. Every layer
+    // around it was live and correct — the CRD, CredentialSet/aion-ecr, five
+    // ConfigSets, the rendered credentials.json, the mount, the env var, the
+    // unscoped --credential_helper — and the helper still answered
+    // `{"headers":{}}` for ECR, so every private-ECR oci.pull base 401'd
+    // fleet-wide and read as "the C++ toolchain is broken" / "RBE is starved".
+    // Config that nothing reads is indistinguishable from config that is wrong.
+    //
+    // Ordering note: config.rs describes itself as sitting between the keychain
+    // registry and the built-in provider defaults. `connections::resolve` bundles
+    // those defaults, so splitting it would mean changing that function; it is
+    // tried FIRST here instead. The practical difference is only for a host that
+    // BOTH a built-in derivation and a config arm claim — for ECR there is no
+    // derivation, so the arm is reached.
+    if let Some(c) = credresolve::config::resolve_host(credresolve::uri::host_of(&uri)) {
+        return headers(&c.header, &c.value, c.expires.as_deref());
+    }
+
+    // Any miss — unknown host, no stored secret, or an error — degrades to
+    // anonymous rather than failing the fetch.
+    EMPTY.to_string()
 }
 
 /// The Bazel credential-helper `get` response. `expires` (RFC 3339) is emitted
@@ -95,6 +123,38 @@ mod tests {
         assert_eq!(
             respond(r#"{"uri":"https://no-such-host.example/x"}"#),
             EMPTY
+        );
+    }
+
+    /// The config arm must be REACHED from `respond`. This is the regression
+    /// guard for the dead-code bug: before `respond` called
+    /// `credresolve::config::resolve_host`, the whole module was stripped from
+    /// the binary and every private-ECR fetch went anonymous. Uses a file-source
+    /// arm so the test needs no AWS, no network, and no docker config.
+    #[test]
+    fn config_arm_is_reachable_from_respond() {
+        let dir = std::env::temp_dir().join(format!("fvk-credcfg-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let secret = dir.join("tok");
+        std::fs::write(&secret, "s3cr3t\n").unwrap();
+        let cfg = dir.join("credentials.json");
+        std::fs::write(
+            &cfg,
+            format!(
+                r#"{{"arms":[{{"hostPatterns":["registry.example.test"],
+                     "valuePrefix":"Basic ",
+                     "secret":{{"file":{{"path":"{}"}}}}}}]}}"#,
+                secret.display()
+            ),
+        )
+        .unwrap();
+        std::env::set_var("FASTVERK_CRED_CONFIG", &cfg);
+        let out = respond(r#"{"uri":"https://registry.example.test/v2/x/manifests/y"}"#);
+        std::env::remove_var("FASTVERK_CRED_CONFIG");
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(
+            out.contains("Basic s3cr3t"),
+            "config arm not reached from respond(); got {out}"
         );
     }
 
