@@ -43,28 +43,34 @@ jobs:
           disk-cache: true
 
       - name: Build artifacts (darwin/arm64 + linux/amd64 + layer)
-        env:
-          BUILDBUDDY_API_KEY: ${{ secrets.BUILDBUDDY_API_KEY }}
+        # ⛔ NO SECRETS IN THIS STEP, and it must stay that way.
+        #
+        # This step used to take BUILDBUDDY_API_KEY and pass it as
+        # `--remote_header=x-buildbuddy-api-key=$KEY`. Two reasons it is gone
+        # (the full measurement is in .bazelrc, where the endpoints lived):
+        #   ⭐ The remote cache never served a hit — not once, in any release
+        #      run, warm or cold. setup-bazel's `disk-cache: true` above is
+        #      what makes this build fast (87s warm vs 361s cold), and it
+        #      needs no credential.
+        #   ⛔ `--remote_header=...=$KEY` puts the secret in bazel's ARGV,
+        #      readable via `ps aux` by anything else on the runner. GitHub
+        #      masks secrets in LOG TEXT; it cannot mask a command line.
+        #
+        # With this step credential-free, the whole workflow needs only the
+        # `contents: write` GITHUB_TOKEN the publish steps use — so the
+        # BUILDBUDDY_API_KEY repo secret can be DELETED, not rotated.
         run: |
           set -euo pipefail
-          # BuildBuddy cache + BES when the key is present; auth via the
-          # header (no credential helper in this repo). Cache errors fall
-          # back to local, so a missing/invalid key never fails the build.
-          if [ -n "${BUILDBUDDY_API_KEY:-}" ]; then
-            REMOTE="--config=remote --remote_header=x-buildbuddy-api-key=${BUILDBUDDY_API_KEY}"
-          else
-            REMOTE=""
-          fi
           L="--platforms=//tools/oci:linux_amd64"
 
-          bazel build $REMOTE //cred-helper:cred_helper
-          cp "$(bazel cquery $REMOTE --output=files //cred-helper:cred_helper)" cred-helper-darwin-arm64
+          bazel build //cred-helper:cred_helper
+          cp "$(bazel cquery --output=files //cred-helper:cred_helper)" cred-helper-darwin-arm64
 
-          bazel build $REMOTE $L //cred-helper:cred_helper
-          cp "$(bazel cquery $REMOTE $L --output=files //cred-helper:cred_helper)" cred-helper-linux-amd64
+          bazel build $L //cred-helper:cred_helper
+          cp "$(bazel cquery $L --output=files //cred-helper:cred_helper)" cred-helper-linux-amd64
 
-          bazel build $REMOTE $L //cred-helper:cred_helper_layer
-          cp "$(bazel cquery $REMOTE $L --output=files //cred-helper:cred_helper_layer)" cred-helper-linux-amd64-layer.tar
+          bazel build $L //cred-helper:cred_helper_layer
+          cp "$(bazel cquery $L --output=files //cred-helper:cred_helper_layer)" cred-helper-linux-amd64-layer.tar
 
           chmod 0755 cred-helper-darwin-arm64 cred-helper-linux-amd64
           shasum -a 256 cred-helper-* > cred-helper-sha256.txt

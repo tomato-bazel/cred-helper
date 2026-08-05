@@ -1,4 +1,32 @@
+load("@rules_shell//shell:sh_test.bzl", "sh_test")
+
 package(default_visibility = ["//visibility:public"])
 
 # crate_universe from_cargo reads the workspace manifest.
 exports_files(["Cargo.toml"])
+
+# ⛔ The regression guard for the reason the BuildBuddy remote cache was removed.
+#
+# Removing the `--remote_header=x-buildbuddy-api-key=$KEY` line fixed the
+# INSTANCE. This test fixes the CLASS: any build-config change that puts a
+# secret-shaped value inside a command-line flag fails here, whichever vendor it
+# points at. Without it, "re-enable the remote cache" is a one-line PR that
+# silently reintroduces an argv leak GitHub's log masking cannot show you.
+#
+# ⚠ Verified NOT inert: run against the pre-removal release.yml it fails on the
+# exact line that leaked (`REMOTE="--config=remote --remote_header=…=${BUILDBUDDY_API_KEY}"`),
+# and against the pre-removal .bazelrc — endpoints only, no secret — it passes.
+# A guard nobody has watched fail is a guard nobody should trust.
+sh_test(
+    name = "no_secret_in_argv_test",
+    size = "small",
+    srcs = ["//tools/guards:no_secret_in_argv_test.sh"],
+    args = [
+        "$(rootpath :.bazelrc)",
+        "$(rootpath :.github/workflows/release.yml)",
+    ],
+    data = [
+        ":.bazelrc",
+        ":.github/workflows/release.yml",
+    ],
+)

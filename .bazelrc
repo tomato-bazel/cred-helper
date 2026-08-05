@@ -17,16 +17,36 @@ build:linux --sandbox_add_mount_pair=/tmp
 build:linux --host_linkopt=-Wl,--no-gc-sections
 build:linux --linkopt=-Wl,--no-gc-sections
 
-# ─── Remote cache + BES (BuildBuddy) ────────────────────────────────
-# Endpoints only — opt-in via `--config=remote`. Auth is NOT in this file:
-# CI passes `--remote_header=x-buildbuddy-api-key=$BUILDBUDDY_API_KEY`, and a
-# local dev keeps that header in ~/.bazelrc. Cache errors fall back to local.
-build:remote --remote_cache=grpcs://remote.buildbuddy.io
-build:remote --bes_backend=grpcs://remote.buildbuddy.io
-build:remote --bes_results_url=https://app.buildbuddy.io/invocation/
-build:remote --remote_timeout=600
-build:remote --remote_cache_compression
-build:remote --experimental_remote_cache_eviction_retries=5
+# ─── No remote cache. This is deliberate; do not re-add one ─────────
+# There used to be a `build:remote` block pointing --remote_cache/--bes_backend
+# at grpcs://remote.buildbuddy.io, authenticated by BUILDBUDDY_API_KEY. It is
+# gone, for two measured reasons.
+#
+# ⭐ 1. It never served a cache hit. Bazel's `N processes:` line names every
+#    strategy that produced a result, and `remote cache hit` appears in ZERO
+#    release runs. Two runs, the two interesting cases:
+#      * disk cache WARM  (run 30153785337) — 87s, "780 disk cache hit,
+#        784 internal, 1 darwin-sandbox". Every hit came from the GitHub
+#        Actions disk cache that setup-bazel restores. Remote: nothing.
+#      * disk cache COLD  (run 30126526020, "Cache not found for keys") —
+#        361s, "784 internal, 781 darwin-sandbox". 781 actions executed
+#        locally. That is precisely the case a remote cache exists to save,
+#        and it saved none of it.
+#    A remote cache that has never answered is not a speed/safety trade-off,
+#    it is an unused credential. `bazel-contrib/setup-bazel`'s `disk-cache:
+#    true` is doing the whole job (87s vs 361s), and it needs no secret.
+#
+# ⛔ 2. The auth mechanism leaks. `--remote_header=x-buildbuddy-api-key=$KEY`
+#    puts the key in bazel's ARGV, where it is readable via `ps aux` by any
+#    other process on the runner for the life of the build. GitHub's secret
+#    masking covers log text; it does not cover a process command line. A
+#    live BuildBuddy key leaked from this estate on 2026-08-04 (via a BEP
+#    fixture), and this repo was one of the places the key was still in use.
+#
+# ⚠ If a remote cache is ever wanted here, point it at roma (the estate's
+#   REAPI cache) via the credential helper this repo BUILDS — never a bare
+#   `--remote_header` with a secret in it. But measure first: the numbers
+#   above say a 3-target repo does not need one.
 
 test --test_output=errors
 test --test_summary=terse
