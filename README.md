@@ -47,22 +47,48 @@ with **no wildcards**, so `*` cannot sneak in as "require everything".
 | What | Where |
 |---|---|
 | **`credresolve`** (library) | the contract: `connection.proto` schema, the read/resolve path, and the `SecretStore` backends. `prost`-only, dependency-light. The single source of truth (fvkit layers `connect`/OAuth on top). |
-| **`cred-helper`** (binary) | a ~40-line wrapper implementing the Bazel credential-helper protocol over `credresolve::resolve`. |
-| **Prebuilt release artifacts** | `cred-helper-{linux-amd64,darwin-arm64}` + `cred-helper-linux-amd64-layer.tar` (`/usr/local/bin/cred-helper`, 0755), published per commit. |
+| **`cred-helper`** (binary) | a thin wrapper implementing the Bazel credential-helper protocol over `credresolve::resolve`. |
+| **`fastverk-oidc`** (binary) | the keyless CI path: trades a GitHub Actions OIDC token for a short-lived fastverk token (RFC 8693) and exports it as `FASTVERK_TOKEN_<HOST>`. Kept a separate crate so its TLS stack never enters the per-fetch helper. |
+| **Prebuilt release artifacts** | see below — published per commit, credential-free. |
+
+## Release artifacts
+
+Every commit to `main` publishes both a rolling `credhelper-latest` and an
+**immutable** `credhelper-<sha>`:
+
+| Artifact | Platform |
+|---|---|
+| `cred-helper-darwin-arm64` | macOS, Apple silicon |
+| `cred-helper-linux-amd64` | Linux x86-64 |
+| `cred-helper-linux-arm64` | Linux aarch64 (Graviton runners, arm64 dev boxes) |
+| `cred-helper-linux-amd64-layer.tar` | OCI layer installing `/usr/local/bin/cred-helper`, 0755 |
+| `fastverk-oidc-linux-amd64` | Linux x86-64 |
+| `fastverk-oidc-linux-arm64` | Linux aarch64 |
+| `cred-helper-sha256.txt` | sha256 of every artifact above |
 
 ## Consume the prebuilt helper
 
-Public releases — fetch with **no auth**. Pin the **immutable** `credhelper-<sha>`
-tag (not the rolling `credhelper-latest`):
+Public releases — fetch with **no auth**.
+
+⚠ Pin the **immutable** `credhelper-<sha>` tag, never the rolling
+`credhelper-latest`: its bytes change under you every build. ⭐ Note the reason
+is *only* that — `credhelper-latest`'s assets are always current. Its
+`publishedAt` is frozen at the day the tag was created and `gh release list`
+sorts by it, which has already caused it to be read as stale when it was not.
+**A release's `publishedAt` is not its assets' freshness.**
 
 ```starlark
 http_file(
     name = "fastverk_cred_helper_layer",
-    urls = ["https://github.com/fastverk/cred-helper/releases/download/credhelper-<sha>/cred-helper-linux-amd64-layer.tar"],
+    urls = ["https://github.com/tomato-bazel/cred-helper/releases/download/credhelper-<sha>/cred-helper-linux-amd64-layer.tar"],
     sha256 = "<from cred-helper-sha256.txt>",
     downloaded_file_path = "cred-helper-linux-amd64-layer.tar",
 )
 ```
+
+⚠ `tomato-bazel`, not `fastverk` — the repo was transferred. GitHub redirects
+the old org today, but a redirect is not a contract, and an `http_file` pinned
+by `sha256` against one that stops redirecting is a fleet-wide fetch failure.
 
 Add `@fastverk_cred_helper_layer//file` to your image `tars`, keep an unscoped
 `--credential_helper=/usr/local/bin/cred-helper`.
@@ -85,7 +111,14 @@ connection registry), which takes precedence over env.
 
 ## Build
 
+⛔ **Bazel only.** A `cargo`-only path is treated as a defect here.
+
 ```sh
-bazel test //...                                                   # host
-bazel build //cred-helper:cred_helper_layer --platforms=//tools/oci:linux_amd64   # linux/amd64 layer
+bazel test //... --keep_going                                      # host
+
+# Cross-compile to either linux triple via the zig hermetic cc toolchain — this
+# works from a mac, no linux builder needed. Same two platforms CI publishes.
+bazel build //cred-helper:cred_helper_layer --platforms=//tools/oci:linux_amd64
+bazel build //cred-helper:cred_helper       --platforms=//tools/oci:linux_arm64
+bazel build //oidc:fastverk-oidc            --platforms=//tools/oci:linux_amd64
 ```

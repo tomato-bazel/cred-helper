@@ -8,8 +8,12 @@ name: release
 # Two releases per merge:
 #   - credhelper-latest  — rolling "what's newest" pointer (clobbered).
 #   - credhelper-<sha>   — IMMUTABLE per-commit release; pin (url, sha256).
-# THREE credential-free artifacts each + a sha256 manifest. Tokens are injected
+# SIX credential-free artifacts each + a sha256 manifest. Tokens are injected
 # as env vars per consuming CI job; the helper resolves them at runtime.
+#
+# ⭐ One macos-14 job builds all four targets: darwin/arm64 natively, and
+# linux/{amd64,arm64} via the zig hermetic cc toolchain. No linux runner, no
+# matrix, no cross-job artifact passing.
 
 on:
   push:
@@ -17,7 +21,14 @@ on:
     paths:
       - 'credresolve/**'
       - 'cred-helper/**'
+      # ⛔ `oidc/**` was MISSING here, and that is why fastverk-oidc had no
+      # release asset for six weeks: it built green, tested green, and a change
+      # to it triggered no release. The keyless-CI story this repo advertises
+      # had no artifact a consumer could fetch. Config that nothing publishes is
+      # indistinguishable from config that does not exist.
+      - 'oidc/**'
       - 'proto/**'
+      - 'tools/**'
       - 'MODULE.bazel'
       - 'Cargo.lock'
       - '.bazelrc'
@@ -42,7 +53,7 @@ jobs:
           bazelisk-cache: true
           disk-cache: true
 
-      - name: Build artifacts (darwin/arm64 + linux/amd64 + layer)
+      - name: Build artifacts (cred-helper + fastverk-oidc, 3 platforms)
         # ⛔ NO SECRETS IN THIS STEP, and it must stay that way.
         #
         # This step used to take BUILDBUDDY_API_KEY and pass it as
@@ -61,35 +72,85 @@ jobs:
         # BUILDBUDDY_API_KEY repo secret can be DELETED, not rotated.
         run: |
           set -euo pipefail
-          L="--platforms=//tools/oci:linux_amd64"
 
-          bazel build //cred-helper:cred_helper
-          cp "$(bazel cquery --output=files //cred-helper:cred_helper)" cred-helper-darwin-arm64
+          # ⭐ Build + copy in one place so a new platform is ONE line, not four.
+          # The previous shape repeated `bazel build X` / `cp $(bazel cquery X)`
+          # per artifact, which is how `oidc` came to be built by nobody.
+          emit() {  # emit <target> <outfile> [--platforms=...]
+            local target="$1" out="$2"; shift 2
+            bazel build "$@" "$target"
+            cp "$(bazel cquery "$@" --output=files "$target")" "$out"
+          }
 
-          bazel build $L //cred-helper:cred_helper
-          cp "$(bazel cquery $L --output=files //cred-helper:cred_helper)" cred-helper-linux-amd64
+          AMD64="--platforms=//tools/oci:linux_amd64"
+          ARM64="--platforms=//tools/oci:linux_arm64"
 
-          bazel build $L //cred-helper:cred_helper_layer
-          cp "$(bazel cquery $L --output=files //cred-helper:cred_helper_layer)" cred-helper-linux-amd64-layer.tar
+          # cred-helper — the per-fetch binary consumers install.
+          emit //cred-helper:cred_helper       cred-helper-darwin-arm64
+          emit //cred-helper:cred_helper       cred-helper-linux-amd64  $AMD64
+          # ⭐ linux-arm64 was never published, and setup-tbzl HARD-FAILS without
+          # it (Graviton runners, arm64 dev boxes). Nothing was missing but the
+          # //tools/oci:linux_arm64 platform — the zig linux_arm64_gnu.2.28
+          # toolchain and the aarch64 rustlib were already registered.
+          emit //cred-helper:cred_helper       cred-helper-linux-arm64  $ARM64
+          emit //cred-helper:cred_helper_layer cred-helper-linux-amd64-layer.tar $AMD64
 
-          chmod 0755 cred-helper-darwin-arm64 cred-helper-linux-amd64
-          shasum -a 256 cred-helper-* > cred-helper-sha256.txt
+          # fastverk-oidc — the keyless CI exchange tool. ⚠ Its BUILD.bazel says
+          # it is "built in CI on the native runner, so no zig cross-compile of
+          # the TLS stack is needed". That was caution, not a constraint:
+          # ureq/rustls/ring cross-compile cleanly to both linux triples via zig,
+          # verified before this change. Linux is where it actually runs.
+          emit //oidc:fastverk-oidc fastverk-oidc-linux-amd64 $AMD64
+          emit //oidc:fastverk-oidc fastverk-oidc-linux-arm64 $ARM64
+
+          chmod 0755 cred-helper-darwin-arm64 cred-helper-linux-amd64 \
+                     cred-helper-linux-arm64 fastverk-oidc-linux-*
+
+          # ⚠ Both prefixes, or the manifest silently omits fastverk-oidc and a
+          # consumer pinning by sha256 has nothing to pin against.
+          shasum -a 256 cred-helper-* fastverk-oidc-* > cred-helper-sha256.txt
           cat cred-helper-sha256.txt
+
+          # ⭐ Fail the release rather than publish a partial one. `gh release
+          # upload` succeeds per-file, so a missing artifact would ship quietly
+          # and only surface as a 404 in a consumer's http_file weeks later.
+          for f in cred-helper-darwin-arm64 cred-helper-linux-amd64 \
+                   cred-helper-linux-arm64 cred-helper-linux-amd64-layer.tar \
+                   fastverk-oidc-linux-amd64 fastverk-oidc-linux-arm64; do
+            [ -s "$f" ] || { echo "::error::expected artifact missing or empty: $f"; exit 1; }
+          done
+
+          # ⭐ The asset list is published from HERE, where the artifacts are
+          # produced — once. It used to be a literal string repeated in both
+          # publish steps below, so adding an artifact meant remembering three
+          # places. Missing one is silent: the release just lacks a file.
+          {
+            echo "RELEASE_FILES=cred-helper-darwin-arm64 cred-helper-linux-amd64 cred-helper-linux-arm64 cred-helper-linux-amd64-layer.tar fastverk-oidc-linux-amd64 fastverk-oidc-linux-arm64 cred-helper-sha256.txt"
+          } >> "$GITHUB_ENV"
 
       - name: Publish rolling prerelease (credhelper-latest)
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          FILES="cred-helper-darwin-arm64 cred-helper-linux-amd64 cred-helper-linux-amd64-layer.tar cred-helper-sha256.txt"
-          NOTES='Rolling cred-helper build — do NOT pin (bytes change each build). Credential-free; tokens are env vars per consuming CI job.'
+          NOTES="Rolling build of $GITHUB_SHA — do NOT pin (bytes change each build); pin credhelper-<sha> instead. Credential-free; tokens are env vars per consuming CI job."
           # View-then-act (not `create || upload`): avoids the "tag exists
           # locally but not pushed" gh failure when the release already exists,
           # and --target pins the tag to this commit on first creation.
           if gh release view credhelper-latest >/dev/null 2>&1; then
-            gh release upload credhelper-latest $FILES --clobber
+            gh release upload credhelper-latest $RELEASE_FILES --clobber
+            # ⭐ Refresh the notes too. `upload --clobber` replaces the ASSETS but
+            # never touches the release's own metadata, so `publishedAt` stayed
+            # frozen at the day the tag was first created — and `gh release view`
+            # / `gh release list` sort by it. That made a release whose assets
+            # were current read as months stale, and a downstream design doc
+            # concluded (wrongly, and in writing) that credhelper-latest "installs
+            # the OLDEST binary". The assets were byte-identical to the newest
+            # commit. ⚠ A release's publishedAt is NOT its assets' freshness —
+            # so put the commit in the notes, where it cannot lie.
+            gh release edit credhelper-latest --notes "$NOTES"
           else
-            gh release create credhelper-latest $FILES --title 'cred-helper (rolling)' --notes "$NOTES" --prerelease --target "$GITHUB_SHA"
+            gh release create credhelper-latest $RELEASE_FILES --title 'cred-helper (rolling)' --notes "$NOTES" --prerelease --target "$GITHUB_SHA"
           fi
 
       - name: Publish immutable per-commit release (credhelper-<sha>)
@@ -99,11 +160,16 @@ jobs:
           set -euo pipefail
           SHA="${GITHUB_SHA:0:12}"
           TAG="credhelper-${SHA}"
-          FILES="cred-helper-darwin-arm64 cred-helper-linux-amd64 cred-helper-linux-amd64-layer.tar cred-helper-sha256.txt"
           if gh release view "$TAG" >/dev/null 2>&1; then
             echo "Immutable release $TAG exists — leaving assets untouched."
           else
-            NOTES="Immutable cred-helper pinned to commit ${SHA}. Pin (url, sha256) against this tag. Layer tar installs /usr/local/bin/cred-helper (0755, x86-64 ELF)."
-            gh release create "$TAG" $FILES --title "cred-helper ${SHA}" --notes "$NOTES" --prerelease --target "$GITHUB_SHA"
+            NOTES="Immutable cred-helper pinned to commit ${SHA}. Pin (url, sha256) against this tag.
+
+          Assets: cred-helper for darwin-arm64 / linux-amd64 / linux-arm64, the linux-amd64 layer tar (installs /usr/local/bin/cred-helper, 0755), and fastverk-oidc for linux-amd64 / linux-arm64."
+            gh release create "$TAG" $RELEASE_FILES --title "cred-helper ${SHA}" --notes "$NOTES" --prerelease --target "$GITHUB_SHA"
           fi
-          echo "Immutable asset base: https://github.com/fastverk/cred-helper/releases/download/${TAG}/"
+          # ⚠ tomato-bazel, not fastverk — the repo was transferred and this URL
+          # was never updated. GitHub redirects the old org today; a redirect is
+          # not a contract, and an http_file pinned by sha256 against one that
+          # stops redirecting is a fleet-wide fetch failure.
+          echo "Immutable asset base: https://github.com/tomato-bazel/cred-helper/releases/download/${TAG}/"

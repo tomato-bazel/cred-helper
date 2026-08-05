@@ -1,3 +1,15 @@
 /bazel-*
 /target
 MODULE.bazel.lock
+
+# ⛔ Release artifacts, built into the repo ROOT by .github/workflows/release.yml.
+# Untracked and unignored, a `git add -A` in a dirty tree commits several MB of
+# built binaries — including a linux ELF — into a PUBLIC repo. Ignored so that
+# cannot happen by accident.
+/cred-helper-darwin-arm64
+/cred-helper-linux-amd64
+/cred-helper-linux-arm64
+/cred-helper-linux-amd64-layer.tar
+/cred-helper-sha256.txt
+/fastverk-oidc-linux-amd64
+/fastverk-oidc-linux-arm64
