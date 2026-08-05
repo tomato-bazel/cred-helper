@@ -8,6 +8,29 @@ nothing in it may become one. The review was triggered by a live BuildBuddy API
 key leaking into a public repo on 2026-08-04; reproducing a credential here
 would be the same mistake with a shorter path.
 
+> ### Status — updated 2026-08-05
+>
+> Four of the eight sequenced steps have shipped. ⭐ **A review whose plan is
+> already stale is worse than no review**, so this box is the index of what is
+> true now; the analysis below is unchanged except where a finding is marked
+> FIXED.
+>
+> | | Step | State |
+> |---|---|---|
+> | 0 | Remove BuildBuddy as this repo's remote cache | ✅ **#8** — key can be deleted, not rotated |
+> | 1 | Fail-open: make a miss loud | ⚠ **#9 + #10 — PARTIAL.** `FASTVERK_CRED_REQUIRE` ships [§2.3](#23--the-fix-claimed-vs-unclaimed) rule 4 only. Rules 1–3 (claims from the registry / config arms / env) are **not** implemented. |
+> | 2 | `linux-arm64`, `fastverk-oidc`, `doctor` | ⚠ **#11 — PARTIAL.** Both artifacts publish. `cred-helper doctor` ([§2.4](#24--but-claims-alone-would-not-have-caught-the-9797-incident)) is **not** built. |
+> | 3 | Precedence: arms above presets | ❌ open — [F-3](#f-3--config-arms-can-never-override-a-built-in-preset) |
+> | 4 | Bazelify codegen, delete `build.rs` | ✅ **#12** — tonic-free toolchain; +1456 bytes (+0.1%) |
+> | 5–8 | `rules_aip`, the `SecretStore` service, client-credentials source, the hub | ❌ open |
+>
+> ⛔ **The top recommendation is still only half-done.** `FASTVERK_CRED_REQUIRE`
+> makes a miss loud for hosts a caller explicitly lists. It does **not** make a
+> miss loud for a host the registry or a config arm already claims, and it does
+> not catch the 97/97 shape (a token present under a name nobody asks for),
+> which needs `doctor`. ⭐ Step 8 (the hub) remains blocked until both land —
+> for the reason in [§6.2](#62--what-is-wrong-about-it-stated-plainly).
+
 ---
 
 ## The single recommendation
@@ -207,7 +230,7 @@ a file.
 
 ## 3 · Findings
 
-### F-1 · ⛔ The BuildBuddy key was in bazel's argv on every release run
+### F-1 · ✅ FIXED (#8) · The BuildBuddy key was in bazel's argv on every release run
 
 `release.yml:54` (pre-fix):
 
@@ -225,7 +248,7 @@ otherwise catch it.
 (`--flag=…$SECRET`) rather than on the vendor — pointing a future cache at roma
 the same way would be the same bug.
 
-### F-2 · ⭐ The BuildBuddy remote cache never served a single hit
+### F-2 · ✅ FIXED (#8) · The BuildBuddy remote cache never served a single hit
 
 Bazel's `N processes:` line names every strategy that produced a result. Across
 every release run, `remote cache hit` **never appears**.
@@ -271,7 +294,7 @@ a stray `FASTVERK_TOKEN_<HOST>` silently outranks an explicit, reviewed arm.
 For the "match arms come from configuration" claim to be true, arms must sit
 **above** the built-in presets and above the generic env fallback.
 
-### F-4 · ⛔ `fastverk-oidc` is built and tested, but never published
+### F-4 · ✅ FIXED (#11) · `fastverk-oidc` was built and tested, but never published
 
 `oidc/` is a workspace member, has a `rust_binary`, and its test passes. But:
 
@@ -287,14 +310,14 @@ fetch**. It builds green, which is why nobody noticed. (Compare the dead-code
 bug `main.rs:53-63` already records: config that nothing reads is
 indistinguishable from config that is wrong.)
 
-### F-5 · ⛔ No `linux-arm64` artifact
+### F-5 · ✅ FIXED (#11) · No `linux-arm64` artifact
 
 Same asset list. `setup-tbzl`'s `action.yml:174-177` hard-fails when it needs
 one. Graviton runners and arm64 dev machines cannot use the prebuilt helper.
 This is a one-line addition to the release matrix (the zig toolchain for
 `aarch64-unknown-linux-gnu` is **already registered** in `MODULE.bazel:35`).
 
-### F-6 · ⭐ "`credhelper-latest` is stale" is FALSE — and worth recording as a way things lie
+### F-6 · ✅ FIXED (#11) · "`credhelper-latest` is stale" is FALSE — and worth recording as a way things lie
 
 `setup-tbzl`'s design doc pins the immutable tag partly because
 `credhelper-latest` supposedly "installs the *oldest* binary, predating
@@ -325,7 +348,7 @@ its metadata stops lying.
 behavior for a fallback chain and it is another quiet hole; `doctor` should
 report which backends are actually live on this platform.
 
-### F-8 · ⚠ Stale org identity throughout
+### F-8 · ✅ PARTLY FIXED (#11) · Stale org identity throughout
 
 `README.md:25`, `Cargo.toml:13`, and `release.yml`'s header all say
 `fastverk/cred-helper`. The repo is `tomato-bazel/cred-helper`. The README's
@@ -333,6 +356,10 @@ report which backends are actually live on this platform.
 redirects today; a redirect is not a contract, and `http_file` with a pinned
 `sha256` against a redirect that stops redirecting is a fleet-wide fetch
 failure. Low effort, non-zero risk.
+
+✅ #11 fixed the two that matter — the README's `http_file` example and the
+asset-base URL the release prints. ⚠ **Still stale:** `Cargo.toml:13`'s
+`repository` field and `release.yml`'s header comment.
 
 ---
 
@@ -797,15 +824,15 @@ not landed.
 
 | # | Step | Breaks consumers? | Notes |
 |---|---|---|---|
-| **0** | ✅ **Remove BuildBuddy from this repo's build config** | ❌ no — build config only | *Shipped in the companion PR.* Lets the key be **deleted**, not rotated. |
-| **1** | ⭐⭐ **Fail-open fix behind `FASTVERK_CRED_STRICT=1`** ([§2.3](#23--the-fix-claimed-vs-unclaimed)) | ❌ **no** — opt-in, default unchanged | ⭐ **Land this first.** Highest value, additive, no consumer action. `setup-tbzl` asks for this flag by name. |
-| **2** | `cred-helper doctor` + publish `linux-arm64` + publish `fastverk-oidc` | ❌ no — new subcommand, new assets | Unblocks `setup-tbzl` ([F-5](#f-5--no-linux-arm64-artifact), [F-4](#f-4--fastverk-oidc-is-built-and-tested-but-never-published)) and gives §2.4 its home. |
+| **0** | ✅ **DONE (#8)** — Remove BuildBuddy from this repo's build config | ❌ no — build config only | Lets the key be **deleted**, not rotated. Measured: zero cache hits ever; first BuildBuddy-free release ran 366s, matching the historical cold profile exactly. |
+| **1** | ⚠ **PARTIAL (#9, #10)** — Fail-open fix ([§2.3](#23--the-fix-claimed-vs-unclaimed)) | ❌ no — opt-in, default unchanged | Shipped as `FASTVERK_CRED_REQUIRE`: rule 4 (an explicit host list) only. ⛔ **Rules 1–3 remain open** — a host the registry or a config arm already claims is still silently anonymous. ⚠ #10 was needed because the matching rule shipped untested: an inverted implementation passed the whole suite. |
+| **2** | ⚠ **PARTIAL (#11)** — `cred-helper doctor` + publish `linux-arm64` + publish `fastverk-oidc` | ❌ no — new assets | ✅ Both artifacts publish (verified live: 7 assets). ⛔ **`doctor` is not built**, so the 97/97 shape — a token present under a name nobody asks for — is still undetectable. |
 | **3** | Fix precedence: arms above presets ([F-3](#f-3--config-arms-can-never-override-a-built-in-preset)) | ⚠ **behavior change** | A host with both an arm and an env var now resolves via the arm. Correct, but it must be released deliberately, not folded into another step. |
-| **4** | ⭐ **Bazelify codegen**: delete `build.rs`, `proto_library` + two prost toolchains ([§7.1](#71--the-current-codegen-path-is-the-defect)–[§7.2](#72--two-toolchains-from-one-proto)) | ❌ no — bytes may differ, behavior identical | Pure build-system change. ⚠ Do it *before* any proto grows a `service`, so the service arrives on working machinery instead of debugging both at once. |
-| **5** | `rules_aip` + lint, conflicts resolved per [§7.3](#73--rules_aip--adopt-with-reported-conflicts); `ResolvedCred` → proto | ❌ no | Adds `//proto/...:aip_lint` to `bazel test //...`. |
-| **6** | Define the `SecretStore` proto `service`; in-process impls unchanged | ❌ no — nothing serves it yet | ⭐ The contract lands with **no runtime risk**. This is the cheap half of the redesign and it can sit here indefinitely. |
+| **4** | ✅ **DONE (#12)** — Bazelify codegen: `build.rs` deleted, `proto_library` + a tonic-free prost toolchain ([§7.1](#71--the-current-codegen-path-is-the-defect)–[§7.2](#72--two-toolchains-from-one-proto)) | ❌ no — behavior identical, **+1456 bytes (+0.1%)** | ⭐ Verified tonic-free by the linked rlib list — no tokio/tonic/mio/socket2. Both §7.2 traps were real and both bit: `prost-types` declared-unused, and an explicit `tonic_plugin_flag = ""`. |
+| **5** | `rules_aip` + lint, conflicts resolved per [§7.3](#73--rules_aip--adopt-with-reported-conflicts); `ResolvedCred` → proto | ❌ no | ⭐ **Unblocked by #12** — `connection.proto` is a real `proto_library` now, so the lint and any descriptor consumer have something to attach to. |
+| **6** | Define the `SecretStore` proto `service`; in-process impls unchanged | ❌ no — nothing serves it yet | ⭐ The contract lands with **no runtime risk**, and #12 built the machinery it needs. The cheap half of the redesign; it can sit here indefinitely. |
 | **7** | Client-credentials secret source ([§5.5](#55--the-ps-aux-claim--confirmed-and-worse-than-reported)) | ⚠ new capability | ⭐ Deletes four hand-rolled shell refresh loops and closes the argv exposure. Background-refresher shape only — never synchronous in `get`. |
-| **8** | Hub, per-pod sidecar, remote stores behind it ([§6.4](#64--the-shape-if-it-is-built)) | ⚠ new deployment dep for CI; **none locally** | ⛔ **Blocked on step 1.** Do not build this while "hub down" and "host is anonymous" are the same observable. |
+| **8** | Hub, per-pod sidecar, remote stores behind it ([§6.4](#64--the-shape-if-it-is-built)) | ⚠ new deployment dep for CI; **none locally** | ⛔ **Still blocked on step 1, which is only half done.** `FASTVERK_CRED_REQUIRE` covers a host a caller explicitly lists; a hub failure on any other host is still indistinguishable from "this host is anonymous". |
 
 ⭐ Steps 0–2 are additive and independently valuable; steps 4–6 are pure
 build/contract work with no runtime risk; only 3, 7, and 8 change behavior.
