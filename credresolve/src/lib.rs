@@ -7,12 +7,17 @@
 //! fastverk app (`fvkit`) layers `connect`/OAuth on top of this same core, so
 //! the registry contract lives in exactly one place.
 
-/// Generated prost bindings for `fastverk.v1` (see `build.rs`). Messages
-/// only — no gRPC; the resolve path never needs tonic.
-pub mod proto {
-    #![allow(clippy::all, clippy::pedantic, clippy::nursery)]
-    include!(concat!(env!("OUT_DIR"), "/fastverk.v1.rs"));
-}
+/// Generated prost bindings for `fastverk.v1`. Messages only — no gRPC; the
+/// resolve path never needs tonic, and //proto:prost_toolchain is configured
+/// tonic-free so tokio cannot reach the per-fetch helper binary.
+///
+/// ⚠ This is a RE-EXPORT, not an `include!`. `rust_prost_library` emits a
+/// separate crate named after the `proto_library` TARGET — `connection_proto`,
+/// with the module path mirroring the proto package — so the generated types
+/// live at `connection_proto::fastverk::v1`. Re-exporting them here keeps every
+/// existing `crate::proto::{...}` path compiling unchanged, which is why
+/// replacing build.rs touched one line rather than every call site.
+pub use connection_proto::fastverk::v1 as proto;
 
 pub mod config;
 pub mod connections;

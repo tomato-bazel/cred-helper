@@ -1,0 +1,44 @@
+"""The prost toolchain for //proto/... — deliberately TONIC-FREE.
+
+⛔ `rules_rust_prost` ships a default toolchain that wires `tonic_runtime` into
+every `rust_prost_library`, which drags tokio + mio + socket2 into the dep graph.
+Nothing here speaks gRPC: `credresolve` decodes one persisted message and the
+cred-helper is a synchronous binary Bazel `exec`s once per fetch URI. Taking the
+default would put an async runtime the helper never starts into a binary whose
+whole job is to start fast, and into the closure of a module other repos consume.
+
+⭐ Same shape, and the same reason, as tomato-bazel/gate's //proto:prost_toolchain.
+
+⚠ Registered NON-dev in MODULE.bazel, unlike gate's. See the note there — the
+short version is that there is no way to consume `fastverk_credresolve` without
+building this Rust, so a dev-only registration would simply break consumers.
+"""
+
+load("@rules_rust//rust:defs.bzl", "rust_library_group")
+load("@rules_rust_prost//:defs.bzl", "rust_prost_toolchain")
+
+package(default_visibility = ["//visibility:public"])
+
+rust_library_group(
+    name = "prost_runtime",
+    deps = ["@crates//:prost"],
+)
+
+rust_prost_toolchain(
+    name = "prost_toolchain_impl",
+    prost_plugin = "@rules_rust_prost//private/3rdparty/crates:protoc-gen-prost__protoc-gen-prost",
+    prost_plugin_flag = "--plugin=protoc-gen-prost=%s",
+    prost_runtime = ":prost_runtime",
+    prost_types = "@crates//:prost-types",
+    # ⛔ The toolchain checks the tonic attrs ALL-OR-NOTHING, and
+    # `tonic_plugin_flag` carries a non-empty default. Clearing it explicitly is
+    # what makes the zero-tonic configuration VALID rather than half-configured —
+    # omit this line and the toolchain is rejected at analysis.
+    tonic_plugin_flag = "",
+)
+
+toolchain(
+    name = "prost_toolchain",
+    toolchain = ":prost_toolchain_impl",
+    toolchain_type = "@rules_rust_prost//:toolchain_type",
+)
