@@ -14,6 +14,13 @@ path = "src/lib.rs"
 [dependencies]
 anyhow.workspace = true
 prost.workspace = true
+# ⚠ DECLARED, NOT USED. `rust_prost_toolchain` requires a `prost_types` target,
+# and //proto:prost_toolchain points it at @crates//:prost-types — which only
+# exists if some workspace member declares the dependency. Nothing in this crate
+# references it (connection.proto uses no well-known types). Remove it and the
+# build fails at ANALYSIS with "no such target @crates//:prost-types", which
+# reads like a registry problem rather than a missing Cargo.toml line.
+prost-types.workspace = true
 directories.workspace = true
 serde_json.workspace = true
 
@@ -22,6 +29,3 @@ serde_json.workspace = true
 # crate still builds (e.g. Linux CI), with env/file backends carrying CI auth.
 [target.'cfg(target_os = "macos")'.dependencies]
 keyring.workspace = true
-
-[build-dependencies]
-prost-build.workspace = true

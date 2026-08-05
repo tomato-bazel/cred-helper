@@ -1,34 +1,31 @@
 """credresolve — the fastverk credential-resolution core library.
 
-Proto codegen runs via cargo_build_script + build.rs (prost-build) so `cargo
-build` and `bazel build` produce identical bindings. The build script data-deps
-connection.proto and walks `../proto/...` from CARGO_MANIFEST_DIR = credresolve.
+⭐ Proto codegen comes from `//proto/fastverk/v1:connection_rs`
+(`rust_prost_library`), NOT from a cargo build script. It used to run
+`prost-build` inside a `cargo_build_script`, which made Bazel *execute* a cargo
+build script rather than actually build a proto: the .proto was not a
+`proto_library`, so nothing else in the estate could depend on it, and there
+were two codegen paths to keep true.
+
+⚠ Consequence, stated so it is not discovered: `cargo build -p credresolve` no
+longer works. That is intended — this estate treats a cargo-only path as a
+defect. Cargo.toml / Cargo.lock remain load-bearing for crate_universe's
+`from_cargo`; only proto codegen left cargo.
 """
 
 load("@rules_rust//rust:defs.bzl", "rust_library", "rust_test")
-load("@rules_rust//cargo:defs.bzl", "cargo_build_script")
 load("@crates//:defs.bzl", "all_crate_deps")
 
 package(default_visibility = ["//visibility:public"])
-
-cargo_build_script(
-    name = "build_script",
-    srcs = ["build.rs"],
-    data = ["//proto/fastverk/v1:connection.proto"],
-    edition = "2021",
-    build_script_env = {
-        "PROTOC": "$(execpath @protobuf//:protoc)",
-    },
-    tools = ["@protobuf//:protoc"],
-    deps = all_crate_deps(build = True, package_name = "credresolve"),
-)
 
 rust_library(
     name = "credresolve",
     srcs = glob(["src/**/*.rs"]),
     crate_root = "src/lib.rs",
     edition = "2021",
-    deps = [":build_script"] + all_crate_deps(normal = True, package_name = "credresolve"),
+    deps = [
+        "//proto/fastverk/v1:connection_rs",
+    ] + all_crate_deps(normal = True, package_name = "credresolve"),
 )
 
 rust_test(
@@ -37,4 +34,4 @@ rust_test(
     edition = "2021",
 )
 
-exports_files(["Cargo.toml", "build.rs"])
+exports_files(["Cargo.toml"])

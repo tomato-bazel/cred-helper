@@ -15,6 +15,12 @@ bazel_dep(name = "platforms", version = "1.0.0")
 bazel_dep(name = "bazel_skylib", version = "1.8.2")
 bazel_dep(name = "rules_rust", version = "0.70.0")
 bazel_dep(name = "protobuf", version = "33.4")
+bazel_dep(name = "rules_proto", version = "7.1.0")
+
+# rules_rust_prost generates the Rust bindings from the .proto directly, via
+# //proto:prost_toolchain. It replaces credresolve/build.rs — see the note on
+# register_toolchains below. Its version tracks rules_rust's EXACTLY.
+bazel_dep(name = "rules_rust_prost", version = "0.70.0")
 bazel_dep(name = "rules_pkg", version = "1.0.1")
 
 # dev_dependency: the //:no_secret_in_argv_test build-config guard is the ONLY
@@ -71,3 +77,19 @@ crate.from_cargo(
     ],
 )
 use_repo(crate, "crates")
+
+# The tonic-free prost toolchain (//proto). See that file for why tonic is
+# excluded.
+#
+# ⚠ Registered NON-dev, unlike the equivalent in tomato-bazel/gate, and the
+# difference is deliberate. gate's registration is dev-scoped because a consumer
+# might want only its .rq gates and never build Rust at all — imposing a
+# toolchain on them is the leakage gate exists to flag. Here there is no such
+# consumer: `fastverk_credresolve` IS the Rust, so a dev-only registration would
+# simply fail every consumer's build with "no matching toolchain".
+#
+# ⭐ This is safe against shadowing a consumer's own prost toolchain: the ROOT
+# module's registrations resolve FIRST, so a consumer that registers their own
+# still wins for their own proto libraries. We are only the default for anyone
+# who has not chosen.
+register_toolchains("//proto:prost_toolchain")

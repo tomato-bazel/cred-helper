@@ -1,8 +1,36 @@
 """The fastverk connection-registry contract — the single source of truth for
-the cred-helper and (later) fvkit. Exported for credresolve's build.rs
-(prost-build) to compile.
+the cred-helper and (later) fvkit.
+
+⭐ This is now a real `proto_library`, not a file handed to a cargo build script.
+The difference is that anything in the estate can depend on it: other languages,
+a descriptor set, an api-linter run. `exports_files` is kept only for `cargo`
+users reading the .proto directly; nothing in the Bazel build uses it any more.
+
+`strip_import_prefix` makes the descriptor record the file as
+`fastverk/v1/connection.proto` rather than `proto/fastverk/v1/...`, so the
+recorded path matches `package fastverk.v1`.
 """
 
+load("@rules_proto//proto:defs.bzl", "proto_library")
+load("@rules_rust_prost//:defs.bzl", "rust_prost_library")
+
 package(default_visibility = ["//visibility:public"])
+
+proto_library(
+    name = "connection_proto",
+    srcs = ["connection.proto"],
+    strip_import_prefix = "/proto",
+)
+
+# ⚠ THE EMITTED RUST CRATE IS NAMED AFTER THE `proto` TARGET, NOT AFTER THIS ONE.
+# So this produces a crate called `connection_proto`, with the module path
+# mirroring the proto package — Rust consumers write
+# `connection_proto::fastverk::v1`, while Bazel consumers depend on
+# `:connection_rs`. `credresolve`'s lib.rs re-exports that path as
+# `credresolve::proto` so every existing `crate::proto::{...}` keeps compiling.
+rust_prost_library(
+    name = "connection_rs",
+    proto = ":connection_proto",
+)
 
 exports_files(["connection.proto"])
