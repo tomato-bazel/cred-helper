@@ -6,6 +6,42 @@ host→connection registry, through pluggable secret backends — **keychain**
 (local/mac), **env vars** (CI), and **file** — degrading to anonymous on any
 miss so a fetch never fails the build.
 
+
+## ⛔ Making a miss loud, for the hosts that must authenticate
+
+This helper **fails open by design**: any miss yields `{"headers":{}}` and exit 0, so a fetch
+degrades to anonymous rather than failing the build. That is correct for the common case —
+most fetches in a Bazel build go to public hosts (BCR, crates.io, a public ghcr) that need no
+credential, and a helper that errored on those would break every build immediately.
+
+⛔ It has a cost, and this estate has paid it twice. A dead-code-eliminated config feature made
+every private-ECR pull 401 and read as *"the C++ toolchain is broken"*; a helper timeout under
+ECR minting read as *"RBE is starved"*. In both, the helper answered `{"headers":{}}` with exit
+0, Bazel sent no `Authorization` header, and the far end returned `UNAUTHENTICATED` — so the
+symptom named the wrong system entirely.
+
+⭐ **`FASTVERK_CRED_REQUIRE` names the hosts that must authenticate**, comma-separated. For
+those hosts only, a miss is a non-zero exit with a message naming the variable the helper
+actually looks up:
+
+```console
+$ FASTVERK_CRED_REQUIRE=rbe.tbzl.dev cred-helper get <<<'{"uri":"https://rbe.tbzl.dev/"}'
+cred-helper: no credential resolved for rbe.tbzl.dev, which FASTVERK_CRED_REQUIRE lists as requiring one.
+...
+Check that FASTVERK_TOKEN_FILE_RBE_TBZL_DEV names a readable, non-empty file
+$ echo $?
+1
+```
+
+⭐ **The asymmetry is what makes this safe.** Anonymous is a legitimate answer for a host nobody
+said had to authenticate, and never a legitimate answer for one somebody did. So this is
+**opt-in per host, never global** — a global strict mode is the version of this idea that gets
+reverted the first afternoon.
+
+⚠ Unset means today's behavior, exactly. Matching is exact and case-insensitive on the host,
+with **no wildcards**, so `*` cannot sneak in as "require everything".
+
+
 ## Surfaces
 
 | What | Where |
