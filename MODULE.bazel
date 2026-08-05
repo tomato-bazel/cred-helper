@@ -17,6 +17,12 @@ bazel_dep(name = "rules_rust", version = "0.70.0")
 bazel_dep(name = "protobuf", version = "33.4")
 bazel_dep(name = "rules_pkg", version = "1.0.1")
 
+# dev_dependency: the //:no_secret_in_argv_test build-config guard is the ONLY
+# thing that needs sh_test, and it never runs in a consumer. A non-dev
+# bazel_dep here would push rules_shell into the module graph of everyone who
+# depends on fastverk_credresolve, for a test they cannot run.
+bazel_dep(name = "rules_shell", version = "0.6.1", dev_dependency = True)
+
 # Hermetic CC via zig cc — provides the linux sysroots so a rust_binary built
 # with --platforms=//tools/oci:linux_amd64 links to x86-64 Linux from a mac.
 bazel_dep(name = "hermetic_cc_toolchain", version = "4.1.0")

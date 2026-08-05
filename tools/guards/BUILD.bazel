@@ -1,0 +1,8 @@
+"""Build-config guards. Scripts only — the `sh_test` that runs them lives in
+//BUILD.bazel, because the files it guards (`.bazelrc`, `.github/workflows/*`)
+belong to the ROOT package and a label can only name a file in its own package.
+"""
+
+package(default_visibility = ["//visibility:public"])
+
+exports_files(["no_secret_in_argv_test.sh"])
