@@ -100,7 +100,6 @@ helper resolves them at runtime. First non-empty wins:
 
 - GitHub hosts → `GITHUB_TOKEN` / `GH_TOKEN` → `Authorization: Bearer`
 - GitLab (gitlab.com) → `GITLAB_TOKEN` → `Authorization: Bearer`
-- BuildBuddy → `BUILDBUDDY_API_KEY` → `x-buildbuddy-api-key`
 - canonical form for any built-in connection: `FASTVERK_TOKEN_<ID>`
 - **any other host** (e.g. a self-hosted GitLab) → `FASTVERK_TOKEN_<HOST>` (host
   uppercased, non-alphanumerics → `_`, e.g. `FASTVERK_TOKEN_GIT_EXAMPLE_COM`) →

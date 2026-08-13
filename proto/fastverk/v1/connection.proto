@@ -98,11 +98,11 @@ message OAuthConfig {
 // One managed connection: which hosts it covers, what header to inject,
 // and where its secret lives in the keychain.
 message Connection {
-  // Stable slug, e.g. "github", "gitlab", "buildbuddy".
+  // Stable slug, e.g. "github", "gitlab".
   string id = 1;
   // Human label, e.g. "GitHub", "GitLab (gitlab.example.com)".
   string display_name = 2;
-  // Provider preset: "github" | "gitlab" | "buildbuddy" | "generic".
+  // Provider preset: "github" | "gitlab" | "generic".
   string provider = 3;
   // Hosts this connection authenticates. Exact ("github.com") or a
   // "*.suffix" wildcard ("*.github.com").

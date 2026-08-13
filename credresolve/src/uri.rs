@@ -67,8 +67,8 @@ mod tests {
     #[test]
     fn parses_common_shapes() {
         assert_eq!(host_of("https://github.com/o/r"), "github.com");
-        assert_eq!(host_of("grpcs://remote.buildbuddy.io"), "remote.buildbuddy.io");
-        assert_eq!(host_of("https://remote.buildbuddy.io:443/y"), "remote.buildbuddy.io");
+        assert_eq!(host_of("grpcs://rbe.tbzl.dev"), "rbe.tbzl.dev");
+        assert_eq!(host_of("https://rbe.tbzl.dev:443/y"), "rbe.tbzl.dev");
         assert_eq!(host_of("https://user:pw@github.com/a/b"), "github.com");
         assert_eq!(host_of("https://[::1]:8080/p"), "[::1]");
         assert_eq!(host_of("github.com/foo"), "github.com");
@@ -82,8 +82,8 @@ mod tests {
             Some("https://github.com/a")
         );
         assert_eq!(
-            parse_request_uri(r#"{ "uri" : "grpcs://remote.buildbuddy.io" , "x": 1 }"#).as_deref(),
-            Some("grpcs://remote.buildbuddy.io")
+            parse_request_uri(r#"{ "uri" : "grpcs://rbe.tbzl.dev" , "x": 1 }"#).as_deref(),
+            Some("grpcs://rbe.tbzl.dev")
         );
         assert_eq!(parse_request_uri("{}"), None);
         assert_eq!(parse_request_uri("not json"), None);
