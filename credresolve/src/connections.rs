@@ -90,7 +90,7 @@ pub struct ResolvedCred {
 /// Resolve the auth header for a request URI. `None` => anonymous fetch.
 ///
 /// Matches the request host against the user's registry first, then the
-/// built-in [`default_registry`] (github.com / gitlab.com / buildbuddy), then
+/// built-in [`default_registry`] (github.com / gitlab.com), then
 /// a generic per-host env convention. A matched connection's `secret_refs`
 /// are tried in order (keychain locally, the canonical env var in CI) via the
 /// [`secretstore::Resolver`]. Best-effort: a corrupt registry or a keychain
@@ -212,7 +212,7 @@ fn host_env_token(host: &str) -> Option<String> {
         .filter(|v| !v.is_empty())
 }
 
-/// The built-in connections — GitHub, GitLab, BuildBuddy — each carrying a
+/// The built-in connections — GitHub and GitLab — each carrying a
 /// keychain ref and the canonical/alias env refs. Used as the fallback when
 /// a host isn't in the user's registry (notably CI, which has no registry
 /// file and resolves the env backend). This replaces the old hand-rolled
@@ -220,7 +220,7 @@ fn host_env_token(host: &str) -> Option<String> {
 #[must_use]
 pub fn default_registry() -> ConnectionRegistry {
     let mut reg = ConnectionRegistry::default();
-    for provider in ["github", "gitlab", "buildbuddy"] {
+    for provider in ["github", "gitlab"] {
         if let Ok(c) = preset(provider, "", "") {
             reg.connections.push(c);
         }
@@ -246,7 +246,6 @@ fn default_host(provider: &str) -> &'static str {
     match provider {
         "github" => "github.com",
         "gitlab" => "gitlab.com",
-        "buildbuddy" => "remote.buildbuddy.io",
         _ => "",
     }
 }
@@ -333,20 +332,23 @@ pub fn preset(provider: &str, host: &str, client_id: &str) -> Result<Connection>
                 ..Default::default()
             });
         }
-        "buildbuddy" => {
-            // BuildBuddy authenticates with a static API key (no OAuth).
-            c.display_name = "BuildBuddy".to_string();
-            c.provider = "buildbuddy".to_string();
-            c.host_patterns = vec![host.to_string()];
-            c.header = "x-buildbuddy-api-key".to_string();
-            c.auth_kind = AuthKind::ApiKey as i32;
-        }
-        other => bail!("unknown provider preset: {other} (use github|gitlab|buildbuddy)"),
+        // ⛔ THERE IS NO `buildbuddy` PRESET ANY MORE, AND ITS ABSENCE IS THE POINT.
+        // It resolved remote.buildbuddy.io -> `x-buildbuddy-api-key` from
+        // $BUILDBUDDY_API_KEY. That key was committed to a PUBLIC repository on
+        // 2026-08-05 carrying CACHE-WRITE, so the exposure was cache poisoning, and the
+        // estate removed BuildBuddy rather than rotating a key for a service it does not
+        // need. Deleting the callers left the CAPABILITY intact: anything that set the env
+        // var would have re-armed it silently. Deleting the preset is what makes it
+        // impossible. Do not re-add one.
+        other => bail!("unknown provider preset: {other} (use github|gitlab)"),
     }
     // Where this connection's secret lives, in precedence order: the
     // keychain locally, then the canonical env var (+ provider/host alias
     // names) for CI/automation. Secrets never live in the registry itself.
-    let account = if provider == "buildbuddy" { "api-key" } else { "oauth" };
+    // ⚠ Every remaining preset is OAuth. This was a conditional while an api-key provider
+    // existed; it is not one now, and a future api-key provider should reintroduce the
+    // branch deliberately rather than inherit it.
+    let account = "oauth";
     c.secret_refs = vec![
         secretstore::keychain_ref(format!("fastverk.{id}"), account),
         secretstore::env_ref(canonical_env_var(&id), env_aliases(provider)),
@@ -380,7 +382,6 @@ fn env_aliases(provider: &str) -> Vec<String> {
     match provider {
         "github" => vec!["GITHUB_TOKEN", "GH_TOKEN"],
         "gitlab" => vec!["GITLAB_TOKEN"],
-        "buildbuddy" => vec!["BUILDBUDDY_API_KEY"],
         _ => vec![],
     }
     .into_iter()
@@ -445,11 +446,6 @@ mod tests {
         assert!(gl.host_patterns.iter().any(|h| h == "gitlab.com"));
         let gl2 = preset("gitlab", "gitlab.example.com", "x").unwrap();
         assert_eq!(gl2.id, "gitlab.example.com");
-
-        let bb = preset("buildbuddy", "", "").unwrap();
-        assert_eq!(bb.auth_kind(), AuthKind::ApiKey);
-        assert_eq!(bb.header, "x-buildbuddy-api-key");
-        assert_eq!(keychain_of(&bb), ("fastverk.buildbuddy", "api-key"));
 
         assert!(preset("nope", "", "").is_err());
     }
