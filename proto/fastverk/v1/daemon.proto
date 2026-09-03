@@ -1,0 +1,64 @@
+syntax = "proto3";
+
+// fastverk daemon (`fvd`) IPC — the request/response envelope the
+// cred-helper (and the `fv` CLI) speak to `fvd` over the Unix-domain
+// socket at `$FASTVERK_SOCKET` (see paths::socket_path).
+//
+// Why this exists: on macOS the login Keychain re-prompts for a password
+// whenever the *reading binary* is not in the stored item's ACL. A
+// rebuilt or re-downloaded cred-helper is a different binary each time, so
+// it re-prompts on every fetch. Routing all Keychain reads through the
+// long-lived `fvd` (which is unlocked once, on first read, and then trusted
+// for the life of the login session) collapses that to a single prompt.
+//
+// Framing on the wire: a 4-byte big-endian length prefix, then the
+// prost-encoded message. One request, one response, per connection — the
+// cred-helper hot path opens the socket, asks, and closes. `fvd` keeps the
+// Keychain handle; the cred-helper never touches the Keychain when the
+// daemon answers.
+
+package fastverk.v1;
+
+// A cred-helper -> fvd request. Today only a keychain read; future
+// variants (full resolve, token-refresh trigger) add oneof arms here.
+message DaemonRequest {
+  oneof request {
+    // Read a single keychain item by (service, account).
+    GetSecretRequest get_secret = 1;
+  }
+}
+
+// Read the secret behind one keychain item. fvd resolves it against the
+// OS Keychain on the cred-helper's behalf so the helper never opens a
+// Keychain entry itself (and so the prompt happens once, in fvd).
+message GetSecretRequest {
+  // Keychain item "service" (e.g. "fastverk.gitlab").
+  string service = 1;
+  // Keychain item "account" (e.g. "oauth" / "pat").
+  string account = 2;
+}
+
+// The fvd -> cred-helper response.
+message DaemonResponse {
+  oneof response {
+    GetSecretResponse get_secret = 1;
+    // A structured error (daemon couldn't service the request). The
+    // cred-helper treats any error as a miss and falls back to its direct
+    // path, so the build never fails on a daemon hiccup.
+    DaemonError error = 2;
+  }
+}
+
+// The result of a GetSecretRequest.
+message GetSecretResponse {
+  // Whether the item was found. `false` => absent (not an error).
+  bool found = 1;
+  // The secret bytes, when found. Never logged.
+  string secret = 2;
+}
+
+// A daemon-side error, surfaced to the client for diagnostics only.
+message DaemonError {
+  // Human-readable message. Never contains a secret value.
+  string message = 1;
+}
