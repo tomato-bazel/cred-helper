@@ -1,0 +1,50 @@
+syntax = "proto3";
+
+// GitLab-specific connect helpers.
+//
+// Background: `fv connect gitlab` runs an OAuth device flow and stores the
+// resulting OAuth *access token*. That token authenticates the GitLab REST
+// API, but GitLab's **package registry** (npm/maven/etc.) rejects OAuth
+// tokens with HTTP 401 — it only accepts a Personal Access Token (PAT),
+// deploy token, or CI job token carrying `read_package_registry` (or the
+// broader `read_api`/`api`) scope. So a connection holding only an OAuth
+// token authenticates the API but NOT the registry.
+//
+// The fix: after the OAuth flow, mint a registry-capable PAT via
+//   POST https://<host>/api/v4/user/personal_access_tokens
+// (GitLab >= 16.1) using the OAuth token as the bearer, and store THAT PAT
+// as the connection's secret. credresolve owns the *shapes* and the pure
+// helpers (endpoint, body, registry-401 detection); fvkit owns the HTTP
+// (it already has the network stack for the OAuth flow), keeping this crate
+// dependency-light on the cred-helper hot path.
+
+package fastverk.v1;
+
+// Body for `POST /api/v4/user/personal_access_tokens` — mints a PAT for
+// the authenticated user (the OAuth token is the bearer). Serializes to
+// the JSON GitLab expects; built by gitlab::mint_pat_request.
+message MintPatRequest {
+  // PAT name, e.g. "fastverk-gitlab.savvifi.com".
+  string name = 1;
+  // Scopes to grant. We request ["read_api"], which covers package-registry
+  // reads (and API reads) without granting write.
+  repeated string scopes = 2;
+  // Expiry date, RFC 3339 date (YYYY-MM-DD). GitLab caps PAT lifetime; we
+  // request ~1 year out.
+  string expires_at = 3;
+}
+
+// The relevant subset of GitLab's PAT-creation response. The `token` field
+// is the freshly minted PAT to store in the keychain.
+message MintPatResponse {
+  // The minted PAT secret. Never logged.
+  string token = 1;
+  // Numeric token id (non-secret), for status/revocation.
+  int64 id = 2;
+  // Echoed name.
+  string name = 3;
+  // Echoed expiry (YYYY-MM-DD).
+  string expires_at = 4;
+  // Echoed granted scopes.
+  repeated string scopes = 5;
+}

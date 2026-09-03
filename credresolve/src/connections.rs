@@ -11,7 +11,7 @@ use anyhow::{bail, Context, Result};
 use prost::Message;
 
 use crate::proto::{AuthKind, Connection, ConnectionRegistry, OAuthConfig};
-use crate::{paths, secretstore, uri};
+use crate::{gitlab, paths, secretstore, uri};
 
 /// Load the persisted registry, or an empty one when none exists.
 pub fn load() -> Result<ConnectionRegistry> {
@@ -85,6 +85,13 @@ pub struct ResolvedCred {
     /// than cache the first value forever. Env/keychain secrets are static, so
     /// they leave this `None` and behave exactly as before.
     pub expires: Option<String>,
+    /// An optional non-secret diagnostic for stderr (never the header
+    /// value). Set, e.g., when a GitLab package-registry fetch is about to
+    /// use an OAuth-only token that the registry will reject — see
+    /// [`crate::gitlab::refresh_hint`]. The cred-helper prints it to stderr so
+    /// the user gets an actionable "run `fv connect … --refresh`" message;
+    /// the fetch still proceeds (and will surface the real 401 if it misses).
+    pub warning: Option<String>,
 }
 
 /// Resolve the auth header for a request URI. `None` => anonymous fetch.
@@ -113,6 +120,7 @@ pub fn resolve(req_uri: &str) -> Result<Option<ResolvedCred>> {
             header: "Authorization".to_string(),
             value: format!("Bearer {secret}"),
             expires: Some(rfc3339_utc(now_secs() + file_token_ttl_secs())),
+            warning: None,
         }));
     }
     // User registry wins; the built-in defaults fill in on a miss (or when
@@ -124,10 +132,19 @@ pub fn resolve(req_uri: &str) -> Result<Option<ResolvedCred>> {
     });
     if let Some(conn) = conn {
         if let Some(secret) = secretstore::Resolver::standard().resolve(&conn.secret_refs) {
+            // Proactive GitLab-registry guard: if this is a GitLab connection
+            // being used for a `/packages/` URI but the stored token is
+            // OAuth-shaped (which the registry rejects with 401), attach an
+            // actionable "re-mint" hint. Diagnostic only — the fetch proceeds.
+            let warning = (conn.provider == "gitlab"
+                && gitlab::is_package_registry_uri(req_uri)
+                && !gitlab::looks_registry_capable(&secret))
+            .then(|| gitlab::refresh_hint(&conn.id));
             return Ok(Some(ResolvedCred {
                 header: conn.header.clone(),
                 value: format!("{}{secret}", conn.value_prefix),
                 expires: None,
+                warning,
             }));
         }
     }
@@ -141,6 +158,7 @@ pub fn resolve(req_uri: &str) -> Result<Option<ResolvedCred>> {
             header: "Authorization".to_string(),
             value: format!("Bearer {secret}"),
             expires: None,
+            warning: None,
         }));
     }
     Ok(None)
@@ -328,6 +346,14 @@ pub fn preset(provider: &str, host: &str, client_id: &str) -> Result<Connection>
                 auth_url: format!("https://{host}/oauth/authorize"),
                 token_url: format!("https://{host}/oauth/token"),
                 device_auth_url: format!("https://{host}/oauth/authorize_device"),
+                // `api` is required so the OAuth token can mint a registry-
+                // capable PAT (POST /api/v4/user/personal_access_tokens, see
+                // `crate::gitlab`); `read_repository` covers git fetches. The
+                // stored secret is then that minted PAT — NOT the OAuth token —
+                // because GitLab's package registry rejects OAuth tokens with
+                // HTTP 401 and accepts only a PAT/deploy/CI-job token carrying
+                // `read_api`/`read_package_registry`. fvkit's connect/`--refresh`
+                // mints the PAT and writes it to this connection's keychain ref.
                 scopes: vec!["api".to_string(), "read_repository".to_string()],
                 ..Default::default()
             });
@@ -545,5 +571,79 @@ mod tests {
 
         std::env::remove_var(var);
         let _ = std::fs::remove_file(&path);
+    }
+
+    /// `resolve` mutates/reads process-global env + the config dir, so the tests
+    /// that drive it through a scratch registry are serialized.
+    static RESOLVE_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Build a registry holding one self-hosted GitLab connection whose secret
+    /// comes from an env ref (hermetic — no keychain), persist it to a scratch
+    /// config dir, and point `resolve` at it.
+    fn with_gitlab_registry(dir: &std::path::Path, host: &str, env_var: &str) {
+        std::env::set_var("FASTVERK_CONFIG_DIR", dir);
+        // Force the direct (no-daemon) keychain path so a developer's running
+        // fvd can't interfere; the connection resolves from env anyway.
+        std::env::set_var("FASTVERK_NO_DAEMON", "1");
+        let mut c = preset("gitlab", host, "x").unwrap();
+        // Replace the secret refs with a single env ref so the test never
+        // touches the keychain.
+        c.secret_refs = vec![crate::secretstore::env_ref(env_var, vec![])];
+        let mut reg = super::ConnectionRegistry::default();
+        reg.connections.push(c);
+        super::save(&reg).unwrap();
+    }
+
+    /// A GitLab `/packages/` fetch whose stored token is OAuth-shaped (bare
+    /// 64-hex) attaches the re-mint warning; the credential is still returned.
+    #[test]
+    fn gitlab_registry_oauth_token_warns() {
+        let _g = RESOLVE_LOCK.lock().unwrap();
+        let dir =
+            std::env::temp_dir().join(format!("fv-resolve-warn-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let host = "gitlab.warntest.example";
+        let env_var = "FASTVERK_TOKEN_GITLAB_WARNTEST_EXAMPLE";
+        with_gitlab_registry(&dir, host, env_var);
+        // 64-hex => OAuth-shaped => not registry-capable.
+        std::env::set_var(env_var, "a".repeat(64));
+
+        let uri = format!("https://{host}/api/v4/projects/121/packages/npm/@aion/x/-/x-0.1.0.tgz");
+        let cred = super::resolve(&uri).unwrap().expect("a credential");
+        assert_eq!(cred.header, "Authorization");
+        let warning = cred.warning.expect("a re-mint warning for the OAuth token");
+        assert!(warning.contains("--refresh"));
+
+        // A plain API call (not /packages/) does NOT warn.
+        let api = format!("https://{host}/api/v4/projects/121");
+        assert!(super::resolve(&api).unwrap().unwrap().warning.is_none());
+
+        std::env::remove_var(env_var);
+        std::env::remove_var("FASTVERK_CONFIG_DIR");
+        std::env::remove_var("FASTVERK_NO_DAEMON");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// The same `/packages/` fetch with a registry-capable PAT (`glpat-…`)
+    /// does NOT warn — the fix's success case.
+    #[test]
+    fn gitlab_registry_pat_does_not_warn() {
+        let _g = RESOLVE_LOCK.lock().unwrap();
+        let dir = std::env::temp_dir().join(format!("fv-resolve-pat-{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let host = "gitlab.pattest.example";
+        let env_var = "FASTVERK_TOKEN_GITLAB_PATTEST_EXAMPLE";
+        with_gitlab_registry(&dir, host, env_var);
+        std::env::set_var(env_var, "glpat-EXAMPLEEXAMPLEEXAMPLE");
+
+        let uri = format!("https://{host}/api/v4/projects/121/packages/npm/@aion/x/-/x-0.1.0.tgz");
+        let cred = super::resolve(&uri).unwrap().expect("a credential");
+        assert!(cred.warning.is_none(), "a PAT must not warn");
+        assert!(cred.value.starts_with("Bearer glpat-"));
+
+        std::env::remove_var(env_var);
+        std::env::remove_var("FASTVERK_CONFIG_DIR");
+        std::env::remove_var("FASTVERK_NO_DAEMON");
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

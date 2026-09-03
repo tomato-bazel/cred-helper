@@ -6,6 +6,19 @@
 //! Linux (Secret Service) / Windows (Credential Manager) are P6 — there,
 //! these stub out (`get` -> `None`), so callers (e.g. the cred-helper)
 //! fall through to their env-var path and `fvkit` still builds.
+//!
+//! ## Keychain-prompt-once
+//!
+//! Reads go through the long-lived `fvd` daemon **first** (see
+//! [`crate::daemon`]): on macOS the login Keychain re-prompts whenever the
+//! *reading binary* isn't in the stored item's ACL, and the cred-helper is a
+//! fresh, differently-signed binary on every release — so a direct read
+//! re-prompts on every Bazel fetch. `fvd` is a single long-lived process that
+//! unlocks the item once (one prompt per login session) and answers
+//! cred-helper reads over the socket. If `fvd` is unreachable we fall back to
+//! a direct Keychain read, so a down daemon never fails a build (it just
+//! costs a prompt). Writes/deletes always go direct — those are `connect`-time
+//! operations (run from fvkit, which is in the ACL), not hot-path reads.
 
 #[cfg(target_os = "macos")]
 mod backend {
@@ -56,8 +69,34 @@ mod backend {
 }
 
 /// Read the current secret for a keychain item, or `None` if absent.
+///
+/// Tries the `fvd` daemon first (prompt-once; see the module docs and
+/// [`crate::daemon`]). When the daemon is reachable its answer is
+/// authoritative — a found secret, or a definitive "absent" — and we never
+/// touch the Keychain UI from this (short-lived, ever-changing) binary. When
+/// the daemon is unreachable we fall back to a direct Keychain read.
+///
+/// Set `FASTVERK_NO_DAEMON=1` to force the direct path (diagnostics / the
+/// daemon itself, which must not recurse into its own client).
 pub fn get(service: &str, account: &str) -> anyhow::Result<Option<String>> {
+    if !direct_only() {
+        if let Some(answer) = crate::daemon::get_secret(service, account) {
+            // Daemon answered (found, absent, or a structured error). Its
+            // result is authoritative; don't fall back to a direct read (which
+            // would re-prompt) just because the item happened to be absent.
+            return answer;
+        }
+    }
     backend::get(service, account)
+}
+
+/// Whether to bypass the daemon and read the Keychain directly. `fvd` sets
+/// `FASTVERK_NO_DAEMON=1` for its own reads so it never calls back into the
+/// daemon client; it's also a manual escape hatch for diagnostics.
+fn direct_only() -> bool {
+    std::env::var("FASTVERK_NO_DAEMON")
+        .map(|v| !v.is_empty() && v != "0")
+        .unwrap_or(false)
 }
 
 /// Store (or replace) the secret for a keychain item.

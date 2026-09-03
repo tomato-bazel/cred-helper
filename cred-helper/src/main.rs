@@ -147,6 +147,12 @@ fn respond(body: &str) -> String {
     // CI). `resolve` falls back to the built-in default registry, so CI with
     // no registry file still authenticates via the env backend.
     if let Ok(Some(c)) = credresolve::connections::resolve(&uri) {
+        // Surface any non-secret diagnostic (e.g. a GitLab package-registry
+        // fetch about to use an OAuth-only token, which the registry 401s)
+        // on stderr — never on stdout, which carries the protocol reply.
+        if let Some(w) = &c.warning {
+            eprintln!("{w}");
+        }
         return headers(&c.header, &c.value, c.expires.as_deref());
     }
 

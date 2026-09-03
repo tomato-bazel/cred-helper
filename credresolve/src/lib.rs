@@ -22,6 +22,8 @@ pub use connection_proto::fastverk::v1 as proto;
 pub mod config;
 pub mod connections;
 pub mod credstore;
+pub mod daemon;
+pub mod gitlab;
 pub mod paths;
 pub mod secretstore;
 pub mod uri;

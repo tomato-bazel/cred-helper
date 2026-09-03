@@ -18,7 +18,11 @@ package(default_visibility = ["//visibility:public"])
 
 proto_library(
     name = "connection_proto",
-    srcs = ["connection.proto"],
+    srcs = [
+        "connection.proto",
+        "daemon.proto",
+        "gitlab.proto",
+    ],
     strip_import_prefix = "/proto",
 )
 
@@ -33,4 +37,8 @@ rust_prost_library(
     proto = ":connection_proto",
 )
 
-exports_files(["connection.proto"])
+exports_files([
+    "connection.proto",
+    "daemon.proto",
+    "gitlab.proto",
+])
